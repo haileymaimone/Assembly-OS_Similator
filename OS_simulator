@@ -1,5 +1,5 @@
 TITLE CSC 323: Program 3 - Operating System Program         (G1P3.asm)
-; Group 1:  Hailey Maimone - mai5013@calu.edu, Ricky Peddicord - ped8697@calu.edu, Kelli Huff - huf2203@calu.edu
+;  Hailey Maimone - mai5013@calu.edu
 ; This program will simulate a time slicing operating system with priorities
 ; It will simulate the processing of jobs, but not actually run any jobs
 
