@@ -1,0 +1,1264 @@
+TITLE CSC 323: Program 3 - Operating System Program         (G1P3.asm)
+; Group 1:  Hailey Maimone - mai5013@calu.edu, Ricky Peddicord - ped8697@calu.edu, Kelli Huff - huf2203@calu.edu
+; This program will simulate a time slicing operating system with priorities
+; It will simulate the processing of jobs, but not actually run any jobs
+
+
+INCLUDE Irvine32.inc
+
+.data
+helpString BYTE "-----------------------------------------------------------------------------------------------", 10, 13				; string for displaying help procedure
+		   BYTE "The Operating System Simulator has the following usage: ", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "QUIT                          Terminates the program", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "HELP                          Provides help with the program (you are here)", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "SHOW                          Shows the job Queue", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "RUN job                       Changes the job mode from HOLD to RUN, it must already exist in the queue", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "HOLD job                      Changes the job mode from RUN to HOLD, it must already exist in the queue", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "KILL job                      Removes a job from the job queue, the job must be in the HOLD mode", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "STEP n                        Processes n cycles of the simulation stepping the system clock,", 10, 13 
+		   BYTE"                              if n is omitted then one is defaulted and n is a positive integer", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "CHANGE job new_priority       Changes a job's priority to new_priority, providing it is a number between 0 and 7", 10, 13
+		   BYTE " ", 10, 13
+		   BYTE "LOAD job priority run_time    Loads a job with a priority between 0 and 7 and a run_time between 1 and 50,", 10, 13
+		   BYTE"                              and is put in HOLD mode", 10, 13
+		   BYTE "-----------------------------------------------------------------------------------------------", 10, 13, 0
+
+displayScreen EQU 30												; constant for display screen line count
+nonalphaTable BYTE "~`!@#$%^&*()_-+={}[]|\:;<,>.?/", 0				; string containg non-alpha characters
+
+; Prompt msg and error strings
+JobNameString BYTE "Job Name: ", 0
+PriorityString BYTE "Priority: ", 0
+StatusString BYTE "Status: ", 0
+RuntimeString BYTE "Run Time: ", 0
+LoadtimeString BYTE "Load Time: ", 0
+SystemString BYTE "System Time: ", 0
+jnameString BYTE "Enter Job name: ", 0
+jnotfound BYTE "Error: Job was not found", 0
+jempty BYTE "Error: Job queue is empty", 0
+enterName BYTE "Please enter a job name: ", 0
+enterPri BYTE "Please enter a priority: ", 0
+enterRun BYTE "Please enter a runtime: ", 0
+badPri BYTE "Error: Bad priority entered", 0
+badRunString BYTE "Error: Bad runtime entered", 0
+badName BYTE "Error: No Job name entered", 0
+holdModeString BYTE "Error: Job is already in Hold mode", 0
+runModeString BYTE "Error: Job is already in Run mode", 0
+commandMsg BYTE "Enter a Command: ", 0
+aloadString BYTE "Error: Job already exists in queue.", 0
+badloadString BYTE "Error: Insufficent input parameters entered", 0
+noroomString BYTE "Error: Job queue is full", 0
+runerrorString BYTE "Error: Can't kill job, it is in run mode", 0
+availableString BYTE "AVAILABLE", 0
+helpParams BYTE "Error: HELP command doesn't take any parameters", 0
+showParams BYTE "Error: SHOW command doesn't take any parameters", 0
+alphaString BYTE "Error: Non-alpha character entered", 0
+invalidNumber BYTE "Error: You did not enter a number", 0
+noRunString BYTE "Error: No jobs in RUN mode", 0
+
+
+jobFinished BYTE "Job finished processing at time ", 0				; string to signify that the job has been completed
+
+number SDWORD ?														; variable to hold number
+count SDWORD ?														; variable to hold count number for job stepping
+BestPriority SDWORD ?												; variable to hold the best priority
+Goodbye BYTE "Terminating program...", 0							; string to signify the program is terminating
+bufferSize EQU 41													; constant value to represent buffer size
+byteCount DWORD ?													; string to hold input buffer bytecount
+buffer BYTE bufferSize DUP(0)										; array to act as input buffer
+wordbuffer BYTE bufferSize DUP(0)									; array to act as word buffer
+jnameBuffer BYTE 9 DUP(0)											; array to act as job name buffer
+invalid BYTE "Error: Invalid operation", 0							; string for invalid input
+null EQU 0															; constant value to represent null character
+tab EQU 9															; constant value to represent tab character 
+invNum DWORD ?														; variable for signifying if a number is valid
+inRunMode DWORD ?													; variable for signfying if a job is in run mode
+
+; Command strings 
+quitTarget BYTE "QUIT", 0											; QUIT command string
+helpTarget BYTE "HELP", 0											; HELP command string
+loadTarget BYTE "LOAD", 0											; LOAD command string
+runTarget BYTE "RUN", 0												; RUN command string
+holdTarget BYTE "HOLD", 0											; HOLD command string
+killTarget BYTE "KILL", 0											; KILL command string
+showTarget BYTE "SHOW", 0											; SHOW command string
+stepTarget BYTE "STEP", 0											; STEP command string
+changeTarget BYTE "CHANGE", 0										; CHANGE command string
+
+; Record offsets
+recordSize EQU 14													; Job Size (14 bytes per job record)
+status EQU 0														; Job Status (1 byte)
+priority EQU 1														; Job Priority (1 byte)
+jName EQU 2															; Job Name (8 bytes)
+loadtime EQU 10														; Load Time (2 bytes)
+runtime EQU 12														; Run Time (2 bytes)
+
+; Record constants
+JobAvailable EQU 0
+JobRun EQU 1
+JobHold EQU 2
+LowestPriority EQU 7
+
+numberJobs EQU 10													; Total number of Jobs that can be stored
+
+; Allocate memory for the jobs
+Jobs BYTE numberJobs * recordSize DUP(0)							; Array of Job record
+EndOfJobs DWORD EndOfJobs											; DWORD that points to the end of the job record
+JobPointer DWORD ?													; Job Pointer 
+system_time WORD ?													; variable for keeping track of the system time
+
+
+.code
+main PROC
+	mov system_time, 0												; init system time
+	mov JobPointer, OFFSET EndOfJobs - recordSize					; init job pointer
+	while1:															; command handler loop
+		call processCommand											; get the command
+		jc endwhile1												; stop if the quit flag, carry, is set
+		jmp while1													; continue to loop
+	endwhile1:
+		mov edx, OFFSET Goodbye										; print exit message
+		call WriteString
+		call Crlf
+	exit
+main ENDP
+
+processCommand PROC
+	; save registers
+	push eax
+	push ecx
+	push edx
+	push esi
+	push edi
+	mov edx, OFFSET commandMsg										; print prompt message
+	call WriteString												
+	call getInput													; copy keyboard input to buffer
+	call SkipSpace													; skip white space
+	call getWord													; get the word entered
+	call Crlf
+	call convertToUpper												; convert the word to uppercase if it is lowercase
+
+	; case statements
+	caseCommands:													; test for quit
+		cld															; compare forward
+		push edi
+		mov esi, OFFSET wordbuffer									; the command from the command line
+		mov edi, OFFSET quitTarget									; the quit string
+		mov ecx, SIZEOF quitTarget									; size of quit
+		repe cmpsb													; compare the strings
+		pop edi
+		jne Case1													; not quit, try next case
+		stc															; quit program by changing loop flag
+		jmp EndCommand												; jump to end of case
+	Case1:															; test for help
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; the command from the command line
+		mov edi, OFFSET helpTarget									; the help string
+		mov ecx, SIZEOF helpTarget									; size of help
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case2													; not help, try next case
+		call jobHelp												; call help procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case2:															; test for load
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; the command from the command line
+		mov edi, OFFSET loadTarget									; the load string
+		mov ecx, SIZEOF loadTarget									; size of load
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case3													; not load, try next case
+		call loadJob												; call load procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case3:															; test for run
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; command from the command line
+		mov edi, OFFSET runTarget									; the run string
+		mov ecx, SIZEOF runTarget									; size of run
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case4													; not run, try next case
+		call runJob													; call run procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case4:															; test for hold
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; command from the command line
+		mov edi, OFFSET holdTarget									; the hold string
+		mov ecx, SIZEOF holdTarget									; size of hold
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case5													; not hold, try next case
+		call holdJob												; call hold procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case5:															; test for kill
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; command from the command line
+		mov edi, OFFSET killTarget									; the kill string
+		mov ecx, SIZEOF killTarget									; size of kill
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case6													; not kill, try next case
+		call killJob												; call kill procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case6:															; test for show
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; the command from the command line
+		mov edi, OFFSET showTarget									; the show string
+		mov ecx, SIZEOF showTarget									; size of show
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case7													; not show, try next case
+		call showJob												; call show procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case7:															; test for step
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; command from the command line
+		mov edi, OFFSET stepTarget									; the step string
+		mov ecx, SIZEOF stepTarget									; size of step
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Case8													; not step, try next case
+		call stepJob												; call step procedure
+		call Crlf
+		jmp EndCommand												; jump to end of case
+	Case8:															; test for change
+		cld															; compare forward
+		push edi													; save register
+		mov esi, OFFSET wordbuffer									; command from the command line
+		mov edi, OFFSET changeTarget								; the change string
+		mov ecx, SIZEOF changeTarget								; size of change
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register value
+		jne Default													; not change, jump to default case
+		call changeJob												; call change procedure
+		call Crlf
+		jmp EndCommand												; jump to end case
+	Default:
+		mov edx, OFFSET invalid										; display invalid message
+		call WriteString			
+		Call Crlf
+		Call Crlf
+	EndCommand:
+		; restore registers
+		pop edi
+		pop esi
+		pop edx
+		pop ecx
+		pop eax
+		ret															; return
+processCommand ENDP
+
+getInput PROC
+	mov byteCount, 0												; initialize bytecount to 0
+	mov buffer, 0													; initialize buffer to 0
+	mov edx, OFFSET buffer											; read command line
+	mov ecx, SIZEOF buffer - 1
+	call ReadString
+	mov byteCount, eax												; keep byte count
+	mov ebx, 0														; initialize buffer index (ebx) to 0
+	ret																; return
+getInput ENDP
+
+SkipSpace PROC
+	; save registers
+	push edi
+	push ecx
+	push edx
+	push esi
+	mainLoop:
+		cmp ebx, byteCount											; compare ebx to end of line
+		jge EmptyEnd												; jump to end if nothing to process
+		mov al, buffer[ebx]											; move buffer character into al
+		cmp al, null												; check if the character is null
+		je EmptyEnd													; if it is, jump to end
+		cmp al, ' '													; check if the character is a space
+		je NextChar													; if it is, we'll grab the next character
+		cmp al, tab													; check if the character is a tab
+		je NextChar													; if it is, we'll grab the next character
+		jmp FoundChar												; otherwise, we found the character
+	NextChar:
+		inc ebx														; increment index
+		jmp mainLoop												; repeat main loop
+	FoundChar:
+		clc															; found a character, so clear the carry
+		jmp EndLoop													; jump to end
+	EmptyEnd:
+		stc															; didn't find any characters, so set the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop edi
+		ret															; return
+SkipSpace ENDP
+
+clearWordbuffer PROC
+	; save registers
+	push edi
+	push eax
+	mov al, 0														; move 0 to al
+	mov edi, OFFSET wordbuffer										; move memory location of word buffer to edi
+	mov ecx, LENGTHOF wordbuffer									; move length of wordbuffer to ecx
+	cld																; compare forward
+	rep stosb														; move null character from al to every location in wordbuffer
+	; restore registers
+	pop eax
+	pop edi
+	ret																; return
+clearWordbuffer ENDP
+
+getWord PROC
+	; save registers
+	push eax
+	push edi
+	push ecx
+	push edx
+	push esi
+	call clearWordbuffer											; clear the wordbuffer
+	mov edi, 0														; initialize wordbuffer index (edi) to 0
+	mainLoop:
+		cmp ebx, byteCount											; check if end of line
+		jge EndBuffer												; if it is, jump to EndBuffer
+		cmp al, null												; check if character is null
+		je EndBuffer												; if it is, jump to EndBuffer
+		call searchAlpha											; check if character is a non-alpha
+		jc NonAlpha													; if it is, jump to NonAlpha
+		cmp al, ' '													; check if character is a space
+		je EndBuffer												; if it is, jump to EndBuffer
+		cmp al, tab													; check if character is a tab
+		je EndBuffer												; if it is, jump to EndBuffer
+		mov wordbuffer[edi], al										; otherwise it is a good character and we move it into wordbuffer
+		inc ebx														; increment input buffer index
+		inc edi														; increment wordbuffer index
+		mov al, buffer[ebx]											; move character from input buffer into al
+		jmp mainLoop												; repeat
+	NonAlpha:
+		call Crlf
+		mov edx, OFFSET alphaString									; print nonalpha character error message
+		call WriteString
+		call Crlf
+	EndBuffer:
+		cmp edi, 0													; check if wordbuffer has something
+		jne HaveEnd													; if it does, jump to HaveEnd
+		stc															; otherwise it doesn't, set the carry
+		jmp EndLoop													; jump to end
+	HaveEnd:
+		mov wordbuffer[edi], null									; move null terminating character to end of wordbuffer
+		clc															; clear the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop edi
+		pop eax
+		ret															; return
+getWord ENDP
+
+getJobName PROC
+	; save registers
+	push eax
+	push ecx
+	push edx
+	push esi
+	loopStart:
+		call SkipSpace												; skip whitespace
+		jc mainLoop													; if no character found, jump to mainLoop
+		cmp al, null												; otherwise check if the character is null
+		je mainLoop													; if it is, jump to mainLoop
+		jmp EndLoop													; otherwise, jump to end
+	mainLoop:
+		mov edx, OFFSET enterName									; print name prompt string
+		call WriteString
+		call getInput												; call getInput to read the keyboard input
+		jmp loopStart												; jump back to beginning loop
+	EndLoop:
+		call getWord												; get the word
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop eax
+		ret															; return
+getJobName ENDP
+
+getNumber PROC
+	; save registers
+	push eax
+	push edi
+	push ecx
+	push edx
+	push esi
+	mov edx, ebx													; move current ebx value to edx
+	mov number, 0													; initialize number to 0
+	mov invNum, 0													; initialize invNum to 0
+	mainLoop:
+		cmp ebx, byteCount											; check if end of line
+		jge EndDigit												; if it is, jump to EndDigit
+		mov al, buffer[ebx]											; otherwise move character from buffer to al
+		cmp al, null												; check if character is null
+		je EndDigit													; if it is, jump to EndDigit
+		cmp al, '0'													; check if character is less than 0
+		jl EndDigit													; if it is, jump to EndDigit
+		cmp al, '9'													; check if character is greater than 9
+		jg EndDigit													; if it is, jump to EndDigit
+		and al, 0fh													; AND the character with 0fh to convert the character into a digit
+		cbw															; convert the character (now a byte) into a word
+		cwd															; convert the character (now a word) into a dword
+		movzx ecx, al												; move and extend the digit into the ecx register
+		mov eax, number												; move number (earlier intialized to 0) to eax register
+		push ebx													; save ebx register
+		mov ebx, 10													; move 10 to ebx (for multiplying the digit by 10)
+		mul ebx														; multiply the digit by 10 (the result is stored in eax)
+		add eax, ecx												; add the value of our number variable to our digit
+		pop ebx														; get back original ebx value
+		mov number, eax												; move the result to the number variable so it can be used on loop reentry
+		inc ebx														; increment ebx so we can move to the next character
+		jmp mainLoop												; loop
+	EndDigit:
+		cmp edx, ebx												; compare current ebx to edx (our initial ebx value)
+		jne GoodNum													; if they are not equal we have something, so jump to GoodNum
+		cmp ebx, byteCount											; check if end of line
+		jge SetCarry												; if it is, jump to SetCarry
+		Other:
+			mov invNum, 1											; otherwise, it is an invalid number so mov 1 to invNum
+		SetCarry:
+		stc															; set the carry
+		jmp EndLoop													; jump to end
+	GoodNum:
+		clc															; clear the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop edi
+		pop eax
+		ret															; return
+getNumber ENDP
+
+getPriority PROC
+	; save registers
+	push eax
+	push ecx
+	push edx
+	push esi
+	call SkipSpace													; skip whitespace
+	call getNumber													; get the number
+	jc promptLoop													; if not a valid number, jump to promptLoop
+	jmp testPriority												; otherwise, jump to testPriority
+	promptLoop:
+		cmp invNum, 1												; check if it was a valid number
+		je badPriority												; if it is invalid, jump to badPriority
+		; Prompt for Input
+		mov edx, OFFSET enterPri									; print priroity prompt message
+		call WriteString
+		call getInput												; read input from keyboard
+		call SkipSpace												; skip whitespace
+		call getNumber												; get the number
+		jc promptLoop												; if it is invalid, loop
+		call Crlf
+	testPriority:
+		cmp number, 0												; check if the number is less than 0
+		jl badPriority												; if it is, jump to badPriority
+		cmp number, 7												; check if the number is greater than 7
+		jg badPriority												; if it is, jump to badPriority
+		cmp invNum, 1												; check if the number is invalid
+		je badPriority												; if it is, jump to badPriority
+		jmp goodPriority											; otherwise jump to goodPriority
+	badPriority:
+		mov edx, OFFSET badPri										; print badPriority string
+		call WriteString
+		call Crlf
+		call Crlf
+		stc															; prirotiy is bad, so set the carry
+		jmp EndLoop													; jump to end
+	goodPriority:
+		clc															; priority is good, so clear the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop eax
+		ret															; return
+getPriority ENDP
+
+getRuntime PROC
+	; save registers
+	push eax
+	push ecx
+	push edx
+	push esi
+	call SkipSpace													; skip whitespace
+	call getNumber													; get the number
+	jc promptLoop													; if not a valid number, jump to promptLoop
+	jmp testRuntime													; otherwise, jump to testRuntime
+	promptLoop:
+		cmp invNum, 1												; check if it was a valid number
+		je badTime													; if it is invalid, jump to badTime
+		; Prompt for Input
+		mov edx, OFFSET enterRun									; print runtime prompt message
+		call WriteString
+		call getInput												; read input from keyboard
+		call SkipSpace												; skip whitespace
+		call getNumber												; get the number
+		jc promptLoop												; it is invalid, loop
+		call Crlf
+	testRuntime:
+		cmp number, 0												; check if the number is less than 0
+		jl badTime													; if it is, jump to badTime
+		cmp number, 50												; check if number is greater than 50
+		jg badTime													; if it is, jump to badTime
+		cmp invNum, 1												; check if the number is invalid
+		je badTime													; if it is, jump to badTime
+		jmp goodTime												; otherwise jump to goodTime
+	badTime:
+		mov edx, OFFSET badRunString								; print badRuntime string
+		call WriteString
+		call Crlf
+		call Crlf
+		stc															; runtime is bad, so set the carry
+		jmp EndLoop													; jump to end
+	goodTime:
+		clc															; runtime is good, so clear the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop eax
+		ret															; return
+getRuntime ENDP
+
+findNextAvailableJob PROC
+	; save registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push esi
+	mov edi, OFFSET Jobs											; set edi to the beginning of the memory location for Jobs
+	mainLoop:
+		cmp byte ptr status[edi], JobAvailable						; check if job record is available
+		je FoundOne													; if it is, jump to FoundOne
+		add edi, recordSize											; otherwise increment edi to go to next record
+		cmp edi, OFFSET Jobs[numberJobs * recordSize]				; check if edi is currently at the end of Jobs
+		jge NotFound												; if it is, jump to NotFound
+		jmp mainLoop												; otherwise, loop
+	FoundOne:
+		clc															; we found an available job, so clear the carry
+		jmp EndLoop													; jump to end
+	NotFound:
+		stc															; we did not find an available job, so set the carry
+		jmp EndLoop													; jump to end
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret															; return
+findNextAvailableJob ENDP
+
+findJob PROC
+	; save registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push esi
+	mov edi, OFFSET Jobs											; set edi to the beginning of the memory location for Jobs		
+	mainLoop:
+		cmp byte ptr status[edi], JobAvailable						; check if job record is available	
+		je NextOne													; if it is then there is a not a job there so jump to NextOne
+		cld															; otherwise, compare forward
+		push edi													; save current register index
+		add edi, jName												; add name record offset to edi
+		mov esi, OFFSET wordbuffer									; move memory location of wordbuffer to esi
+		mov ecx, loadtime - jName									; move size of name field to ecx (loadtime -jName = 8 bytes)
+		repe cmpsb													; compare the strings
+		pop edi														; get back original register index
+		je FoundJob													; if the strings are equal, jump to FoundJob
+	NextOne:
+		add edi, recordSize											; increment edi to go to next record
+		cmp edi, OFFSET Jobs[numberJobs * recordSize]				; check if edi is currently at the end of jobs
+		jge NotFound												; if it is, jump to NotFound
+		jmp mainLoop												; otherwise jump back to mainLoop
+	FoundJob:
+		clc															; we found a job, so clear the carry
+		jmp EndLoop													; jump to end
+	NotFound:
+		stc															; we did not find a job, so set the carry
+	EndLoop:
+		; restore registers
+		pop esi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret															; return
+findJob ENDP
+
+loadJob PROC
+	; save registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push esi
+	push edi
+	call getJobName													; get the job name
+	jc NoLoad														; if insufficent input entered, jump to NoLoad
+	call findJob													; otherwise try to find the job
+	jc Next															; if we don't find the job, jump to Next
+	cmp byte ptr status[edi], JobAvailable							; otherwise, check if the job is available
+	jne alreadyLoaded												; if it is not then it already is loaded, jump to alreadyLoaded
+	Next:
+		call getPriority											; get the priority
+		jc NoLoad													; if insufficent input entered, jump to NoLoad
+		mov dl, byte ptr number										; otherwise, move the priority to dl
+		call getRuntime												; get the runtime
+		jc NoLoad													; if insufficent input entered, jump to NoLoad
+		mov ax, word ptr number										; otherwise, move the runtime to ax
+		call findNextAvailableJob									; try to find the next available job
+		jc NoRoom													; if job queue is full, jump to NoRoom
+		mov byte ptr status[edi], JobHold							; otherwise set the job to hold mode
+		push edi													; save current register index
+		cld															; copy forward
+		add edi, jName												; init name address in structure
+		mov esi, OFFSET wordbuffer									; init name buffer address
+		mov ecx, LENGTHOF wordbuffer - 1							; set name length
+		rep movsb													; copy name
+		pop edi														; get back original register index 
+		mov byte ptr priority[edi], dl								; set the record's priority
+		mov word ptr runtime[edi], ax								; set the record's runtime
+		mov ax, system_time											; mov the systemtime to ax
+		mov word ptr loadtime[edi], ax								; set the record's loadtime
+		jmp EndLoop													; jump to end
+	alreadyLoaded:
+		mov edx, OFFSET aloadString									; print job exists error message
+		call WriteString
+		call Crlf
+		jmp BadLoad													; jump to BadLoad
+	NoLoad:
+		mov edx, OFFSET badloadString								; print insufficent input error message
+		call WriteString
+		call Crlf
+		jmp BadLoad													; jump to BadLoad
+	NoRoom:
+		mov edx, OFFSET noroomString								; print job queue full error message
+		call WriteString
+		call Crlf
+	BadLoad:
+		stc															; bad load, so set the carry
+		jmp EndLoop													; jump to end
+	GoodLoad:
+		clc															; good load, so clear the carry
+	EndLoop:
+		; restore registers
+		pop edi
+		pop esi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret															; return
+loadJob ENDP
+
+holdJob PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace												; skip whitespace
+	call getWord												; get the word
+	jc NoName													; if no job name entered, jump to NoName
+	call findJob												; otherwise try to find the job
+	jc NotFound													; if the job doesn't exist, jump to NotFound
+	cmp byte ptr status[edi], JobHold							; check if the job is already in hold mode
+	je AlreadyHold												; if it is, jump to AlreadyHold
+	mov byte ptr status[edi], JobHold							; otherwise put the job in hold mode
+	jmp GoodHold												; jump to good hold
+	NoName:
+		mov edx, OFFSET badName									; print no name entered error message
+		call WriteString
+		call Crlf
+		jmp BadHold												; jump to BadHold
+	NotFound:
+		mov edx, OFFSET jnotfound								; print job not found error message
+		call WriteString
+		call Crlf
+		jmp BadHold												; jump to BadHold
+	AlreadyHold:
+		mov edx, OFFSET holdModeString							; print job already in hold mode error message
+		call WriteString
+		call Crlf
+	BadHold:
+		stc														; bad hold, so set the carry
+		jmp EndLoop												; jump to end
+	GoodHold:
+		clc														; good hold, so clear the carry
+	EndLoop:
+		; restore the registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret														; return
+holdJob ENDP
+
+killJob PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace												; skip whitespace
+	call getWord												; get the word
+	jc NoName													; if no job name entered, jump to NoName
+	call findJob												; otherwise try to find the job
+	jc NotFound													; if the job doesn't exist, jump to NotFound
+	cmp byte ptr status[edi], JobRun							; check if the job is in hold mode
+	je RunError													; if it isn't, jump to RunError
+	mov byte ptr status[edi], JobAvailable						; kill the job
+	jmp GoodKill												; jump to GoodKill
+	NoName:
+		mov edx, OFFSET badName									; print no name entered error message
+		call WriteString
+		call Crlf
+		jmp BadKill												; jump to BadKill
+	NotFound:
+		mov edx, OFFSET jnotfound								; print job not found error message
+		call WriteString
+		call Crlf
+		jmp BadKill
+	RunError:
+		mov edx, OFFSET runerrorString							; print job not in run mode error message
+		call WriteString
+		call Crlf
+	BadKill:
+		stc														; bad kill, so set the carry
+		jmp EndLoop												; jump to end
+	GoodKill:
+		clc														; good kill, so clear the carry
+	EndLoop:
+	; restore the registers
+	pop esi
+	pop edi
+	pop edx
+	pop ecx
+	pop ebx
+	pop eax
+	ret															; return
+killJob ENDP
+
+changeJob PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace												; skip whitespace
+	call getWord												; get the word
+	jc NoName													; if no job name entered, jump to NoName
+	call findJob												; otherwise try to find the job
+	jc NotFound													; if the job doesn't exist, jump to NotFound
+	call getPriority											; get the new priority
+	jc NoPriority												; if bad priority entered, jump to NoPriority
+	mov al, byte ptr number										; otherwise move the priority to al
+	mov byte ptr priority[edi], al								; set the record's priority
+	jmp GoodChange												; jump to GoodChange
+	NoName:
+		mov edx, OFFSET badName									; print no name entered error message
+		call WriteString
+		call Crlf
+		jmp BadChange											; jump to BadChange
+	NotFound:
+		mov edx, OFFSET jnotfound								; print job not found error message
+		call WriteString
+		call Crlf
+		jmp BadChange											; jump to BadChange
+	NoPriority:
+		mov edx, OFFSET badPri									; print bad priority error message
+		call WriteString
+		call Crlf
+	BadChange:
+		stc														; bad change, so set the carry
+		jmp EndLoop												; jump to end
+	GoodChange:
+		clc														; good change, so clear the carry
+	EndLoop:
+	; restore the registers
+	pop esi
+	pop edi
+	pop edx
+	pop ecx
+	pop ebx
+	pop eax
+	ret															; return
+changeJob ENDP
+
+runJob PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace											; skip whitespace	
+	call getWord											; get the word
+	jc NoName												; if no job name entered, jump to NoName
+	call findJob											; otherwise try to find the job
+	jc NotFound												; if the job doesn't exist, jump to NotFound
+	cmp byte ptr status[edi], JobRun						; check if the job is already in run mode
+	je AlreadyRun											; if it is, jump to AlreadyRun
+	mov byte ptr status[edi], JobRun						; otherwise put the job into run mode
+	jmp GoodRun												; jump to GoodRun
+	NoName:
+		mov edx, OFFSET badName								; print no name entered error message
+		call WriteString
+		call Crlf
+		jmp BadRun											; jump to BadRun
+	NotFound:
+		mov edx, OFFSET jnotfound							; print job not found error message
+		call WriteString
+		call Crlf
+		jmp BadRun											; jump to BadRun
+	AlreadyRun:
+		mov edx, OFFSET runModeString						; print job already in run mode error message
+		call WriteString
+		call Crlf
+	BadRun:
+		stc													; bad run, so set the carry
+		jmp EndLoop											; jump to end
+	GoodRun:
+		clc													; good run, so clear the carry
+	EndLoop:
+		; restore the registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret													; return
+runJob ENDP
+				
+showJob PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace											; skip whitespace
+	jc NoParams												; if no parameters entered, jump to NoParams to continue processing
+	mov edx, OFFSET showParams								; otherwise, print parameters error message
+	call WriteString
+	call Crlf
+	jmp EndLoop												; jump to end
+	NoParams:
+		call checkJobQueue									; check if the job queue is empty
+		jc EmptyQueue										; if it is, jump to EmptyQueue
+		mov edi, OFFSET Jobs								; otherwise, mov to edi the beginning of the memory location of Jobs
+		mov ecx, 0											; initialize ecx to 0 (we will use it for the display line counter)
+		call Clrscr											; clear the screen so that we can ensure that the beginning of the first job record is on the screen
+		mainLoop:
+			cmp edi, OFFSET Jobs[numberJobs * recordSize]	; check if edi is at the end of Jobs
+			jge EndLoop										; if it is, jump to end
+			cmp byte ptr status[edi], JobAvailable			; check if job is available
+			je Next											; if it is, the job doesn't exist so jump to Next
+		PrintLoop:
+			; Print job name
+			call printJobName								; print the job name
+			inc ecx											; increment display line counter
+
+			; Print job priority
+			mov edx, OFFSET PriorityString					; print priority string
+			call WriteString
+			mov al, byte ptr priority[edi]					; print job priority
+			call WriteInt									
+			call Crlf
+			inc ecx											; increment display line counter
+
+			; Print job status
+			mov edx, OFFSET StatusString					; print status string
+			call WriteString
+			cmp byte ptr status[edi], JobRun				; check if job is in run mode
+			je JobRunMode									; if it is, jump to JobRunMode
+			mov edx, OFFSET holdTarget						; otherwise, print hold string
+			call WriteString
+			jmp EndProc										; jump to EndProc
+			JobRunMode:
+				mov edx, OFFSET runTarget					; print run string
+				call WriteString
+			EndProc:
+				call Crlf
+				inc ecx										; increment display line counter
+
+			; Print job loadtime
+			mov edx, OFFSET LoadtimeString					; print load string
+			call WriteString
+			mov ax, word ptr loadtime[edi]					; print loadtime
+			call WriteInt
+			call Crlf
+			inc ecx											; increment display line counter
+
+			; Print job runtime
+			mov edx, OFFSET RuntimeString					; print runtime string
+			call WriteString
+			mov ax, word ptr runtime[edi]					; print runtime
+			call WriteInt
+			call Crlf
+			inc ecx											; increment display line counter
+			cmp ecx, displayScreen - 1						; check if ecx will reach maximum displayScreen size
+			jnge PausePrint									; if it doesn't, jump to PausePrint
+			call WaitMsg									; otherwise, call WaitMsg
+			call Crlf
+			call Crlf
+			mov ecx, 0										; set ecx back to 0
+			jmp Next										; jump to next
+		PausePrint:
+			call Crlf
+			inc ecx											; increment display line counter
+		Next:
+			add edi, recordSize								; add recordSize to edi to process next record
+			jmp mainLoop									; jump back to mainLoop
+	EmptyQueue:
+		mov edx, OFFSET jempty								; display empty job queue error message
+		call WriteString
+		call Crlf
+	EndLoop:
+		; restore the registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret													; return
+showJob ENDP
+
+stepJob PROC
+	; save registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	mov inRunMode, 1										; ch run mode variable to 1
+	call checkJobQueue										; check if job queue is empty
+	mov edi, JobPointer										; mov JobPointer to edi
+	je NotFound												; if job queue is empty, jump to NotFound
+	mov esi, 0												; initialize esi to 0
+	call SkipSpace											; skip whitespace
+	jc OneStep												; if no step parameter entered, jump to OneStep
+	call getNumber											; try to get a number
+	jc OneStep												; if no step parametere entered, jump to OneStep
+	mov eax, number											; otherwise, move the step number to eax
+	mov count, eax											; and then move it from eax to count
+	jmp mainLoop											; jump down to mainLoop
+	OneStep:
+		mov count, 1										; set count to 1
+		jmp mainLoop										; jump down to mainLoop
+	NotFound:
+		mov inRunMode, 0									; set run mode variable to 0 since the job queue is empty
+		mov edx, OFFSET jempty								; print job queue empty error message
+		call WriteString
+		call Crlf
+		call Crlf
+		jmp EndLoop											; jump to EndLoop
+	mainLoop:
+		cmp count, 0										; check if count is 0
+		je EndLoop											; if it is, jump to EndLoop
+		inc system_time										; otherwise, increment the systemtime
+		mov BestPriority, LowestPriority + 1				; set BestPriority to be the LowestPriority + 1
+		Next:
+			add edi, recordSize								; add recordSize to edi to process the next record
+			cmp edi, OFFSET Jobs[numberJobs * recordSize]	; check if edi is at end of Jobs
+			jge ResetToStart								; if it is, jump to ResetToStart
+			jmp Continue									; otherwise, jump to Continue
+			ResetToStart:
+				mov edi, OFFSET Jobs						; set edi back to the beginning of Jobs (making the process circular)
+			Continue:
+				cmp byte ptr status[edi], JobRun			; check if job is in run mode
+				jne Continue2								; if it isn't, jump to Continue2
+				mov inRunMode, 0							; otherwise set run mode variable to 0, indicating that the job is in fact in run mode
+				mov cl, byte ptr priority[edi]				; move the job priority to cl
+				cmp cl, byte ptr BestPriority				; check if it is the new best priority
+				jl NewBestPriority							; if it is, jump to NewBestPriority
+				jmp Continue2								; otherwise jump to Continue2
+				NewBestPriority:
+					mov byte ptr BestPriority, cl			; mov new best priority from cl to BestPriority
+					mov esi, edi							; move edi to esi to keep a reference to this memory location with the best priority job
+				Continue2:
+					cmp edi, JobPointer						; check if edi is equal to JobPointer
+					jne Next								; if they aren't, jump to Next to process next job
+
+	cmp BestPriority, LowestPriority + 1					; check if BestPriority is equal to LowestPriority + 1
+	je EndProc												; if it is, jump to EndProc
+	cmp esi, 0												; otherwise check if esi is 0
+	jne NewBest												; if it isn't, we have a new best so jump to NewBest
+	jmp ProcessRecord										; otherwise jump to ProcessRecord to process the job
+	NewBest:
+		mov edi, esi										; move esi to edi to process that job
+	ProcessRecord:
+		; print Job details
+		
+		call Crlf
+		mov edx, OFFSET SystemString						; print systemtime string
+		call WriteString
+		mov ax, system_time									; print systemtime
+		call WriteInt
+		call Crlf
+
+		call printJobName									; print job name
+
+		mov edx, OFFSET PriorityString						; print priority string
+		call WriteString
+		mov al, byte ptr priority[edi]						; print job priority
+		call WriteInt
+		call Crlf
+
+		mov edx, OFFSET StatusString						; print status string
+		call WriteString
+		cmp byte ptr status[edi], JobRun					; check if job is in run mode
+		je JobRunMode										; if it is, jump to JobRunMode
+		mov edx, OFFSET holdTarget							; otherwise, print hold string
+		call WriteString
+		jmp EndStat											; jump to EndStat
+		JobRunMode:
+			mov edx, OFFSET runTarget						; print run string
+			call WriteString
+		EndStat:
+			call Crlf
+
+		mov edx, OFFSET LoadtimeString						; print loadtime string
+		call WriteString
+		mov ax, word ptr loadtime[edi]						; print job loadtime
+		call WriteInt
+		call Crlf
+
+		dec word ptr runtime[edi]							; decrement the current runtime 
+		mov ax, word ptr runtime[edi]						; move the new runtime to ax
+		mov edx, OFFSET RuntimeString						; print runtime string
+		call WriteString
+		call WriteInt										; print job runtime
+		call Crlf
+
+		cmp word ptr runtime[edi], 0						; check if job's runtime is 0
+		jne EndProc											; if it isn't, jump to EndProc
+
+		; print job finished
+		mov edx, OFFSET jobFinished							; print job finished string
+		call WriteString
+		mov ax, system_time									; move systemtime to ax
+		call WriteInt										; print systemtime
+		call Crlf
+		mov byte ptr status[edi], JobAvailable				; kill the job since it is done processing
+		mov JobPointer, edi									; move edi to JobPointer so that JobPointer is pointing to the last processed job
+	EndProc:
+		dec count											; decrement count
+		jmp mainLoop										; jump back up to mainLoop
+	EndLoop:
+		cmp inRunMode, 1									; check if there are any jobs in run mode
+		je NoRun											; if there aren't, jump to NoRun
+		jmp TheEnd											; otherwise jump to end
+			NoRun:
+			mov edx, OFFSET noRunString						; print no jobs in run mode error message
+			call WriteString
+			call Crlf
+	TheEnd:
+		; restore registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret													; restore
+stepJob ENDP
+
+checkJobQueue PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	mov edi, OFFSET Jobs									; set edi to the beginning of the memory location of Jobs
+	mainLoop:
+		cmp byte ptr status[edi], JobAvailable				; check if current job is available
+		je NextOne											; if it is, jump to NextOne to check the next record
+		jmp FoundJob										; otherwise we found a job, jump to FoundJob
+	NextOne:
+		add edi, recordSize									; add recordSize to edi to process next job
+		cmp edi, OFFSET Jobs[numberJobs * recordSize]		; check if edi is at end of Jobs
+		jge NotFound										; if it is then the job queue is empty, jump to NotFound
+		jmp mainLoop										; otherwise, jump to mainLoop
+	FoundJob:
+		clc													; we found a job, so clear the carry
+		jmp EndLoop											; jump to end
+	NotFound:
+		stc													; we didn't find a job, so set the carry
+	EndLoop:
+		; restore the registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret													; return
+checkJobQueue ENDP
+
+convertToUpper PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	mov ecx, LENGTHOF wordbuffer							; move length of wordbuffer to ecx
+	mov esi, OFFSET wordbuffer								; move the memory location of wordbuffer to esi
+	Convert:
+		and byte ptr [esi], 0dfh							; convert the character that esi is currently pointing to to uppercase, or if already is uppercase it stays uppercase
+		inc esi												; increment esi
+		loop Convert										; loop for the number of times equal to the length of wordbuffer
+	; restore the registers
+	pop esi
+	pop edi
+	pop edx
+	pop ecx
+	pop ebx
+	pop eax
+	ret														; return
+convertToUpper ENDP
+
+searchAlpha PROC
+	; save the registers
+	push eax
+	push ecx
+	push edx
+	push esi
+	push edi
+	mov edi, OFFSET nonalphaTable							; move the memory location of nonalphaTable to edi
+	mov ecx, LENGTHOF nonalphaTable							; move the length of nonalphaTable to ecx
+	cld														; compare forward
+	repne scasb												; scan nonalphaTable to see if it contains what al currently is
+	jnz GoodSearch											; if it doesn't then we have no non-alpha characters, jump to GoodSearch
+	BadSearch:
+		stc													; we found a non-alpha character, so set the carry
+		jmp EndLoop											; jump to end
+	GoodSearch:
+		clc													; search was good, so clear the carry
+	EndLoop:
+		; restore the registers
+		pop edi
+		pop esi
+		pop edx
+		pop ecx
+		pop eax
+		ret													; return
+searchAlpha ENDP
+
+printJobName PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push esi
+	mov esi, edi											; move edi to esi because we need it's location to copy the string
+	push edi												; save edi's current index location
+	cld														; compare forward
+	mov edi, OFFSET jnameBuffer								; move the memory location of jnameBuffer to edi
+	add esi, jName											; add jName offset to esi
+	mov ecx, 8												; move 8 to ecx (the number of characters in the job name)
+	rep movsb												; copy the string
+	pop edi													; restore edi's original index location
+	mov edx, OFFSET JobNameString							; print job name string
+	call WriteString
+	mov edx, edi											; move edi to edx for job name printing
+	add edx, jName											; add jName offset to edx
+	call WriteString										; print the job name
+	call Crlf
+	; restore the registers
+	pop esi
+	pop edx
+	pop ecx
+	pop ebx
+	pop eax
+	ret														; return
+printJobName ENDP
+						
+jobHelp PROC
+	; save the registers
+	push eax
+	push ebx
+	push ecx
+	push edx
+	push edi
+	push esi
+	call SkipSpace											; skip whitespace								
+	jc NoParams												; if no parameters are entered, jump to NoParams
+	call Clrscr												; otherwise, clear the screen
+	mov edx, OFFSET helpParams								; print parameters entered error message
+	call WriteString
+	call Crlf
+	jmp EndLoop												; jump to end
+	NoParams:
+		call Clrscr											; clear the screen
+		mov edx, OFFSET helpString							; print help message string
+		call WriteString
+		call Crlf
+	EndLoop:
+		; restore the registers
+		pop esi
+		pop edi
+		pop edx
+		pop ecx
+		pop ebx
+		pop eax
+		ret													; return
+jobHelp ENDP
+
+END main
